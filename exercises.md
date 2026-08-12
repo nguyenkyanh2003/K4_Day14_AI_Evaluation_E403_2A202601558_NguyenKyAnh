@@ -30,11 +30,11 @@ critical.
 
 | Metric | Acceptable Low Score Scenario | Critical Low Score Scenario | Action Required |
 |---|---|---|---|
-| Faithfulness | | | |
-| Answer Relevance | | | |
-| Context Recall | | | |
-| Context Precision | | | |
-| Completeness | | | |
+| Faithfulness | Answer diễn đạt lại policy bằng từ đồng nghĩa ("non-returnable" ↔ "cannot be returned"), nên overlap thấp nhưng nội dung vẫn grounded. Chỉ chấp nhận được **sau khi đọc trace xác nhận**. | Answer nêu số/ngày/điều kiện **không có** trong context — ví dụ tự chế "45-day window" cho order tháng 8. Khách hành động sai theo lời khuyên sai và mất quyền lợi thật. | Critical → **block deploy**. Thêm grounding check loại bỏ claim không tựa vào chunk. Ngưỡng regression chặt nhất (0.03) vì đây là rủi ro tốn tiền thật. |
+| Answer Relevance | Câu hỏi tình huống dài, answer đúng nhưng cô đọng nên overlap từ vựng thấp. **Đây chính là trường hợp của run này** (max toàn dataset chỉ 0.625). Cũng chấp nhận được với adversarial: refusal đúng *phải* không lặp từ vựng của attacker. | Answer trả lời sang một chủ đề khác hẳn — hỏi về return lại đi giải thích warranty. Khách không được giải quyết và sẽ phải escalate. | Acceptable → sửa **metric** (chuyển sang required-claim coverage), không sửa agent. Critical → sửa intent routing/prompt. Phân biệt bằng cách đọc trace, không bằng con số. |
+| Context Recall | Câu hỏi one-hop mà một chunk đã chứa đủ evidence; các chunk còn lại là nhiễu vô hại nên recall trên union vẫn cao — recall thấp ở đây gần như không xảy ra. | Multi-hop hoặc cross-document (M-, H-case) mà retriever bỏ sót hẳn một document → answer **không thể** đủ dù generation tốt. Hoặc câu out-of-scope không kéo được `00_system_scope.md` (case A01, recall 0.257). | Critical → sửa **retrieval**, không sửa prompt. Tăng top-k, ghim governance document, hoặc chuyển sang hybrid/semantic retrieval. Đây là trần trên của completeness. |
+| Context Precision | Recall đã cao và generator đủ khoẻ để bỏ qua nhiễu — chunk đúng vẫn nằm trong context dù xếp hạng 3–4. Tốn thêm token nhưng không sai kết quả. | Chunk đúng bị đẩy ra ngoài top-k, hoặc chunk nhiễu đứng đầu chứa policy **version cũ** (v1.0 vs v2.0) khiến model trích nhầm 21 ngày thay vì 30 ngày. | Acceptable → chỉ alert, xử lý bằng reranking ở vòng sau. Critical → sửa chunking/ranking. Đọc kèm recall: recall cao + precision thấp = vấn đề ranking; cả hai thấp = vấn đề retrieval. |
+| Completeness | Expected answer được viết dài hơn mức cần thiết, nên answer đúng và gọn vẫn bị trừ (case M07: answer đúng cả kết luận lẫn ngoại lệ mà chỉ được 0.423). Đây là lỗi **dataset**. | Answer bỏ sót một điều kiện quyết định kết quả: quên "10% restocking fee", quên hạn báo hư hỏng 48 giờ, quên "chỉ áp dụng khi OrbitPlus active vào ngày đặt hàng". Khách mất tiền hoặc mất quyền. | Acceptable → rút gọn expected answer về tập claim tối thiểu. Critical → **block deploy**; thêm few-shot ví dụ answer đủ điều kiện, và checklist required-claim cho từng case. |
 
 ### Exercise 1.2 — Bias trong LLM-as-a-Judge
 
@@ -46,15 +46,84 @@ Ba bias thường gặp:
 
 **Câu 1: Thiết kế experiment phát hiện position bias với ít nhất hai conditions.**
 
-> *Câu trả lời:*
+> *Câu trả lời:* **Thiết kế counterbalanced (within-pair), n = 20 cặp answer.**
+>
+> Lấy 20 câu hỏi trong golden dataset. Với mỗi câu, chuẩn bị hai answer A và B
+> có chất lượng **đã được người gán nhãn là tương đương** (ví dụ hai cách diễn
+> đạt của cùng một answer đúng). Sau đó chấm cùng một cặp ở hai điều kiện:
+>
+> | Condition | Thứ tự trình bày | Số lần chấm |
+> |---|---|---:|
+> | C1 | (A, B) | 20 |
+> | C2 | (B, A) | 20 |
+>
+> Judge, rubric, temperature, model đều giữ nguyên; **chỉ thứ tự thay đổi**.
+>
+> - **Biến đo:** tỉ lệ judge chọn answer đứng **vị trí thứ nhất**.
+> - **Giả thuyết H₀:** không có position bias → tỉ lệ chọn vị trí 1 ≈ 50%.
+> - **Chỉ báo bias:** nếu answer ở vị trí 1 thắng đáng kể trên 50% (kiểm định
+>   binomial hai phía, α = 0.05 → với n = 40 thì ngưỡng rơi vào khoảng ≥ 26/40),
+>   kết luận có position bias.
+> - **Chỉ báo trực tiếp hơn — flip rate:** đếm số cặp mà người thắng **đổi** khi
+>   đảo thứ tự. Với judge không bias, flip rate chỉ phản ánh nhiễu; flip rate cao
+>   mà luôn nghiêng về vị trí 1 là bằng chứng mạnh nhất.
+>
+> **Control cần có:** thêm C3 với một cặp answer *chênh lệch rõ rệt* (một đúng,
+> một sai hẳn). Nếu judge không phân biệt nổi cả cặp này thì vấn đề là rubric
+> quá mơ hồ, không phải position bias — nếu thiếu control này ta sẽ quy sai
+> nguyên nhân.
+>
+> **Cách khắc phục nếu phát hiện bias:** chuyển sang absolute scoring (chấm từng
+> answer độc lập với rubric, không đặt cạnh nhau) — đúng như protocol tôi chọn ở
+> Exercise 3.3; hoặc nếu buộc phải so cặp thì chấm cả hai thứ tự rồi lấy trung bình.
 
 **Câu 2: Làm thế nào giảm verbosity bias bằng rubric design?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Nguyên tắc gốc: **biến việc chấm từ "ấn tượng tổng thể" thành
+> "kiểm đếm required element"**, vì độ dài chỉ tác động được vào ấn tượng.
+>
+> 1. **Checklist required claims cho từng case.** Mỗi golden case khai báo sẵn
+>    danh sách claim bắt buộc (H01: `version=1.0`, `days=21`, `counted_from=delivery`).
+>    Judge chỉ đánh dấu có/không từng claim. Thêm 200 chữ không tạo ra claim mới
+>    thì không cộng được điểm nào.
+> 2. **Không đưa độ dài vào bất kỳ dimension nào.** Năm dimension ở Exercise 3.3
+>    (Correctness, Completeness, Evidence, Actionability, Safety) đều không có
+>    dimension nào thưởng độ chi tiết.
+> 3. **Chỉ thị tường minh trong judge prompt:** "Judge only the content: do not
+>    reward an answer for being longer." Câu này nằm sẵn trong `score_response()`.
+> 4. **Tie-break ngược chiều bias:** cùng tập required element thì answer **ngắn
+>    hơn** thắng. Điều này biến độ dài từ lợi thế thành bất lợi nhẹ.
+> 5. **Phạt nội dung thừa gây hại:** claim đúng nhưng không liên quan vẫn làm
+>    loãng answer; claim thừa mà **không** có evidence thì rơi thẳng vào hard cap
+>    "unsupported claim → tối đa 2". Answer càng dài càng nhiều cơ hội dính cap này.
+>
+> **Bằng chứng từ chính lab này:** M07 cho thấy chiều ngược lại cũng có thật —
+> *expected answer* dài quá mức đã dìm điểm một answer đúng và cô đọng
+> (completeness 0.423). Verbosity bias không chỉ nằm ở phía judge, nó nằm ngay
+> trong cách viết ground truth.
 
 **Câu 3: Tại sao cần calibrate LLM judge với human labels?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Bốn lý do, xếp theo mức độ nghiêm trọng.
+>
+> 1. **Judge score không có đơn vị nếu chưa neo.** "4/5" của model nghĩa là gì?
+>    Chỉ có ý nghĩa khi đối chiếu với một tập nhãn người. Không calibrate thì
+>    không biết ngưỡng deploy 0.7 tương ứng với chất lượng thực tế nào.
+> 2. **Judge có systematic bias theo một chiều.** `detect_bias()` bắt được
+>    leniency (trung bình > 0.8) và severity (< 0.3), nhưng chỉ khi ta biết mức
+>    "đúng" là bao nhiêu — mà mức đó đến từ nhãn người. Một judge chấm mọi thứ 4/5
+>    trông rất ổn định trong khi thực chất nó không phân biệt được gì.
+> 3. **Judge và system under evaluation có thể chia sẻ cùng điểm mù.** Nếu cả hai
+>    cùng họ model, judge có xu hướng chấp nhận đúng loại lỗi mà generator hay
+>    mắc (self-preference). Chỉ nhãn người mới phát hiện được lớp lỗi này.
+> 4. **Rủi ro nghiệp vụ nằm ở đuôi phân phối, không ở trung bình.** Trong domain
+>    này, một answer bịa policy bảo hành gây hại thật cho khách. Calibrate cho ta
+>    biết judge có thực sự đẩy loại answer đó xuống mức 1–2 hay không.
+>
+> **Cách làm cụ thể:** lấy ~5 answer đã được người gán nhãn cho **mỗi** mức 1–5
+> (25 mẫu), chấm bằng judge, rồi đo agreement bằng Cohen's kappa hoặc Spearman.
+> Kappa < 0.6 thì phải sửa rubric trước khi dùng judge cho batch lớn. Calibrate
+> lại mỗi khi đổi judge model, vì cùng rubric trên model khác sẽ cho thang khác.
 
 ### Exercise 1.3 — Evaluation trong CI/CD
 
@@ -62,13 +131,44 @@ Ba bias thường gặp:
 
 | Metric | Threshold | Lý do |
 |---|---:|---|
-| Faithfulness | | |
-| Answer Relevance | | |
-| Completeness | | |
+| Faithfulness | **0.70** (tuyệt đối) · drop **0.03** so với baseline | Bài giảng lấy 0.7 làm mốc quality gate. Đây là metric duy nhất mà thất bại nghĩa là hệ thống **bịa chính sách**: khách đọc "bạn còn 45 ngày" rồi trả hàng quá hạn và mất tiền thật. Ngưỡng drop chặt nhất vì hậu quả không đảo ngược được. |
+| Answer Relevance | **0.60** (tuyệt đối) · drop **0.05** | Hậu quả là trải nghiệm kém và khách phải hỏi lại, không gây mất mát tài chính. **Cảnh báo quan trọng:** với công thức word-overlap hiện tại, ngưỡng tuyệt đối này **không dùng được** — max toàn dataset chỉ 0.625 nên gate sẽ chặn cả những answer đúng. Chỉ bật ngưỡng tuyệt đối sau khi thay bằng required-claim coverage; trước đó chỉ dùng ngưỡng drop tương đối. |
+| Completeness | **0.65** (tuyệt đối) · drop **0.05** | Thiếu một exception (restocking fee 10%, hạn 48 giờ) gây tranh chấp nhưng thường còn cơ hội sửa ở lượt hỗ trợ sau. Đặt thấp hơn Faithfulness vì thiếu sót ít nguy hiểm hơn bịa đặt. |
+
+> **Ngoài ba metric trên, hai hard gate không dùng ngưỡng trung bình:**
+> mọi case adversarial (A01–A03) fail → block ngay, **dung sai 0**, vì trung bình
+> hoá sẽ giấu mất một lần rò rỉ dữ liệu duy nhất; và bất kỳ answer nào chứa
+> credential, số thẻ đầy đủ hay nội dung system prompt → fail tuyệt đối (kiểm
+> bằng regex, không cần LLM).
 
 **Câu 2: Khi nào dùng offline evaluation, online evaluation và human review?**
 
 > *Câu trả lời:*
+>
+> **Offline evaluation — mỗi commit, mọi lúc.** Chạy trên golden dataset 20 case
+> cố định. Ưu điểm: deterministic, rẻ (suite word-overlap chạy 0.06 giây, không
+> tốn API), lặp lại được nên **so sánh được giữa hai lần chạy** — đúng thứ cần
+> cho regression. Dùng để trả lời "thay đổi này có làm hỏng gì không". Nhược
+> điểm: chỉ biết được những gì đã có trong 20 case; không phát hiện được loại câu
+> hỏi mà ta chưa nghĩ tới.
+>
+> **Online evaluation — liên tục trên traffic thật, sau deploy.** Đo thumbs-up/down,
+> tỉ lệ escalate lên người, tỉ lệ khách hỏi lại cùng vấn đề, tỉ lệ hội thoại kết
+> thúc mà không giải quyết. Dùng để trả lời "hệ thống có thực sự hữu ích không"
+> và để **phát hiện phân bố câu hỏi thật lệch khỏi golden dataset** — chính nguồn
+> để bổ sung case cho vòng sau. Nhược điểm: tín hiệu nhiễu, trễ, và không có
+> ground truth.
+>
+> **Human review — tập nhỏ, nơi metric mù.** Ba nhóm bắt buộc: (1) toàn bộ case
+> adversarial, (2) mọi case đổi trạng thái pass↔fail so với baseline, (3) mẫu
+> ngẫu nhiên ~5% traffic thật để calibrate judge. Dùng để trả lời "metric có
+> đang đo đúng thứ ta quan tâm không".
+>
+> **Vì sao cần cả ba — bằng chứng từ chính lab này:** offline evaluation chấm A02
+> 0.354 và gán nhãn `irrelevant`, trong khi đọc trace thì đó là một lần chống
+> prompt injection **thành công**. Không một ngưỡng tự động nào phát hiện được
+> sai lầm đó; chỉ human review mới thấy. Ngược lại, human review không thể chạy
+> trên mỗi commit. Ba tầng bù trừ cho nhau chứ không thay thế nhau.
 
 ---
 
@@ -347,19 +447,93 @@ verbosity bias và self-preference bằng cách nào?
 Chỉ làm sau khi hoàn thành 3.1–3.3. Chọn hai framework trong RAGAS, DeepEval
 và TruLens; chạy hoặc thiết kế một so sánh có cùng input dataset.
 
-| Tiêu chí | Framework 1: ____ | Framework 2: ____ |
+**Đã chạy thật**, không chỉ thiết kế. RAGAS 0.4.3 và DeepEval 4.1.7 cài trong
+venv riêng, chạy trên **đúng** 20 case trong `artifacts/actual_answers.json`.
+Chỉ dùng metric **non-LLM/deterministic** để so sánh lặp lại được và không tốn
+API: `NonLLMContextRecall`, `NonLLMContextPrecisionWithReference`, `RougeScore`
+(RAGAS) và `Scorer.rouge_score(rouge1)` (DeepEval).
+
+| Tiêu chí | Framework 1: **RAGAS 0.4.3** | Framework 2: **DeepEval 4.1.7** |
 |---|---|---|
-| Setup complexity | | |
-| Metrics available | | |
-| CI/CD integration | | |
-| Kết quả trên cùng dataset | | |
-| Insight rút ra | | |
+| Setup complexity | **Nặng nhất.** Kéo về 244 package (langchain, langgraph, datasets...). Gặp **2 lỗi thật**: (1) `ragas.llms.base` import `langchain_community.chat_models.vertexai` — module đã bị xoá ở langchain-community 0.4, phải viết shim mới import nổi; (2) metric non-LLM cần optional dep `rapidfuzz` không được khai báo, chỉ lộ ra lúc runtime. | Nặng nhưng **cài xong chạy ngay**, không phải vá gì. `Scorer` dùng được luôn sau khi thêm `rouge_score`. |
+| Metrics available | Có **non-LLM variant thật** cho RAG metrics (`NonLLMContextRecall`, `NonLLMContextPrecisionWithReference`) → chạy được offline, deterministic. Cộng bộ LLM-based đầy đủ + Rouge/Bleu/ExactMatch. | **LLM-first.** Metric chủ lực (Faithfulness, AnswerRelevancy, Hallucination, GEval) đều cần LLM + API key. Phần non-LLM chỉ còn `Scorer` thống kê (rouge/bleu/exact match) — **không có** context metric non-LLM. |
+| CI/CD integration | Trả về dataset/dataframe; muốn làm quality gate phải **tự viết** lớp assertion và ngưỡng. | **Pytest-native** — `assert_test(test_case, [metric])` + `deepeval test run`. Cắm thẳng vào `tests/` của lab mà không cần lớp trung gian. Đây là điểm mạnh rõ rệt nhất. |
+| Kết quả trên cùng dataset | Recall **0.442** · Precision **0.585** · Rouge **0.554** | rouge1 **0.645** (không có context metric để so) |
+| Insight rút ra | Strict hơn hẳn ở context metric, nhưng **strict vì lý do sai** — xem phân tích bên dưới. | Số answer-side gần như trùng khít lab heuristic (0.645 vs 0.646), xác nhận cả hai đo cùng một thứ: unigram overlap. |
+
+**So sánh trực tiếp với lab heuristic (trung bình 20 case):**
+
+| Metric | Lab (`template.py`) | RAGAS | DeepEval |
+|---|---:|---:|---:|
+| Context Recall | 0.882 | **0.442** | — |
+| Context Precision | 0.897 | **0.585** | — |
+| Answer-side (Completeness / Rouge) | 0.646 | 0.554 | 0.645 |
 
 - Scores có nhất quán không?
 - Framework nào strict hơn và vì sao?
 - Hai framework có tìm ra cùng failure cases không?
 
 > *Phân tích:*
+>
+> **1. Nhất quán ở answer-side, lệch nghiêm trọng ở context-side.**
+> DeepEval `rouge1` = 0.645 và lab Completeness = 0.646 — chênh 0.001. Không phải
+> trùng hợp: cả hai về bản chất đều là unigram overlap giữa answer và reference,
+> nên đo cùng một đại lượng bằng hai cách viết khác nhau. RAGAS `RougeScore`
+> thấp hơn (0.554) vì mặc định dùng rougeL (longest common subsequence, có tính
+> **thứ tự từ**) chứ không phải rouge1 — nghiêm hơn một cách hợp lý.
+>
+> Ngược lại, context-side lệch gấp đôi: recall 0.882 vs 0.442.
+>
+> **2. RAGAS strict hơn nhiều — nhưng vì granularity mismatch, không phải vì nó
+> phân biệt tốt hơn.** Đây là phát hiện quan trọng nhất của bài bonus này.
+>
+> `NonLLMContextRecall` không tính overlap ở mức token. Nó lấy **từng
+> `reference_context`** (đoạn evidence vàng) rồi hỏi: có `retrieved_context` nào
+> **đủ giống** nó không, đo bằng `NonLLMStringSimilarity` (rapidfuzz) vượt ngưỡng.
+> Kết quả là **nhị phân trên từng gold chunk**, rồi lấy trung bình.
+>
+> Vấn đề: golden dataset của tôi lưu evidence là **câu trích ngắn nguyên văn**
+> (validator bắt buộc substring), trong khi retriever trả về **cả đoạn văn 4–5
+> câu**. String similarity giữa 1 câu và 1 đoạn 5 câu thì thấp — dù đoạn đó
+> **chứa nguyên văn** câu kia. RAGAS kết luận "không retrieve được", còn thực tế
+> evidence nằm ngay trong context.
+>
+> Bằng chứng: M03, M05, M07, H01, H02 đều bị RAGAS chấm recall **0.000** trong
+> khi lab chấm 0.90–1.00. Đọc trace thì cả năm case này retrieval đều tốt — H02
+> thậm chí có gold chunk đứng hạng 1. RAGAS đang báo false negative có hệ thống.
+>
+> **Kết luận về "strict":** strict không đồng nghĩa với đúng. RAGAS strict hơn
+> nhưng theo một chiều sai; lab heuristic lỏng hơn nhưng ở đây lại gần sự thật
+> hơn. Muốn dùng RAGAS đúng thì phải để `reference_contexts` **cùng cấp độ**
+> với chunk của retriever (lưu cả đoạn thay vì câu trích), hoặc dùng bản
+> LLM-based vốn hiểu quan hệ "câu nằm trong đoạn".
+>
+> **3. Hai framework KHÔNG tìm ra cùng failure cases — chỉ trùng 2/5.**
+>
+> | | Bottom-5 |
+> |---|---|
+> | Lab heuristic | A01, A02, M07, M02, H03 |
+> | RAGAS | A01, M07, H01, H02, E01 |
+> | Trùng nhau | **A01, M07** |
+>
+> A01 bị cả hai chấm tệ nhất — và đây là failure retrieval **thật** duy nhất
+> trong dataset (recall 0.257, `00_system_scope.md` không lọt top-5). Việc hai
+> framework độc lập cùng chỉ vào A01 là tín hiệu mạnh: đây là chỗ đáng sửa.
+>
+> Nhưng H01 và H02 chỉ xuất hiện trong danh sách của RAGAS, và chúng là
+> **artifact granularity** vừa nói. Còn A02 chỉ xuất hiện ở lab, và đó cũng là
+> artifact (refusal đúng bị phạt vì không lặp từ vựng attacker).
+>
+> **Bài học vận hành:** không framework nào ở đây đủ tin cậy để dùng một mình
+> làm quality gate. Cách dùng đúng là lấy **giao** của các danh sách failure làm
+> ưu tiên điều tra (A01, M07), còn phần **chênh lệch** thì coi là tín hiệu để
+> nghi ngờ chính thước đo — đúng như lý do lab bắt làm 5 Whys thủ công thay vì
+> tin log tự động. Nếu chỉ chạy một framework rồi tin con số, tôi sẽ đi sửa
+> retrieval cho H01/H02 (đang hoàn toàn khoẻ) và bỏ sót A02.
+>
+> **Về lựa chọn công cụ:** nếu phải chọn một cho CI/CD của OrbitTech, tôi chọn
+> **DeepEval** vì tích hợp pytest sẵn có, và bổ sung **RAGAS** ở tầng phân tích
+> offline sau khi đã sửa granularity của `reference_contexts`.
 
 ### Exercise 3.5 — Retrieval Reranking (Bonus +5)
 
@@ -372,22 +546,93 @@ thay đổi Context Recall hay không.
 4. Rerank cùng tập chunks, không thêm hoặc xóa chunk.
 5. Tính lại hai metrics và giải thích kết quả.
 
+**Thiết lập.** Reranker là `rerank_by_overlap()` trong `template.py`: sắp xếp
+chunk theo số token trùng với query, giảm dần, `sorted()` ổn định nên chunk hoà
+giữ nguyên rank gốc của retriever. Tập chunk **không thêm không bớt**, chỉ đổi
+thứ tự. Đo trên cả 20 case (13/20 case thực sự bị đổi thứ tự).
+
+**Query dùng để rerank là `question`, không phải `expected_answer`.** Đây là
+quyết định quan trọng: rerank theo `expected_answer` chính là **gold leakage** —
+lúc inference ta không có sẵn đáp án. Tôi vẫn đo biến thể đó nhưng chỉ như
+**oracle upper bound** để biết trần lý thuyết.
+
 | ID | Recall before | Recall after | Precision before | Precision after | Delta Precision |
 |---|---:|---:|---:|---:|---:|
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| | | | | | |
-| **Avg** | | | | | |
+| M04 | 0.861 | 0.861 | 0.750 | 1.000 | **+0.250** |
+| H03 | 0.810 | 0.810 | 0.867 | 0.917 | **+0.050** |
+| M07 | 0.962 | 0.962 | 1.000 | 0.917 | −0.083 |
+| H05 | 0.733 | 0.733 | 0.917 | 0.806 | −0.111 |
+| A03 | 0.935 | 0.935 | 0.887 | 0.679 | **−0.208** |
+| A01 | 0.257 | 0.257 | 0.250 | 0.200 | −0.050 |
+| **Avg (20 case)** | **0.882** | **0.882** | **0.897** | **0.889** | **−0.008** |
+| *Oracle (rerank theo expected)* | *0.882* | *0.882* | *0.897* | *1.000* | *+0.103* |
+
+Tổng kết trên 20 case: **improved 2** (M04, H03) · **degraded 4** (M07, H05, A01,
+A03) · **unchanged 14** · **recall đổi: 0 case**.
+
+**Kết quả: reranking lexical theo question KHÔNG cải thiện Context Precision —
+nó làm giảm nhẹ (0.897 → 0.889).** Đây là kết quả âm và tôi giữ nguyên thay vì
+đổi query sang `expected` để có số đẹp.
+
+**Vì sao thất bại?** Baseline không phải retriever yếu — BM25 của lab đã đạt
+precision 0.897, gần trần. `rerank_by_overlap()` đếm **số token trùng thô**,
+trong khi BM25 có IDF (từ hiếm như "restocking", "OrbitPlus" nặng hơn từ phổ
+biến) và length normalization (chunk dài không được lợi thế). Thay một ranker
+mạnh bằng một ranker yếu hơn thì điểm phải giảm. A03 tụt nhiều nhất (−0.208) vì
+câu hỏi chứa "warranty", "account", "unlock" nên mọi chunk có các từ đó bị đẩy
+lên trên đoạn scope thực sự cần.
+
+Dòng oracle cho thấy **headroom có thật** (precision đạt 1.000 nếu rerank theo
+đáp án), nhưng không tới được bằng tín hiệu lexical từ câu hỏi. Muốn khai thác
+headroom đó phải dùng cross-encoder thật hoặc semantic similarity, không phải
+đếm từ trùng.
 
 **Tại sao Recall dự kiến không đổi?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Vì Context Recall tính trên **union** của các chunk:
+> `|expected ∩ ⋃ tokenize(chunk)| / |expected|`. Union là phép toán trên **tập
+> hợp**, mà tập hợp không có thứ tự — hoán vị các phần tử không đổi kết quả.
+> Reranking chỉ hoán vị, không thêm/bớt chunk nào, nên union giữ nguyên từng
+> token một và recall bất biến về mặt toán học.
+>
+> Đo thực nghiệm xác nhận: delta recall = **+0.000 trên cả 20/20 case**, không
+> phải "xấp xỉ 0" mà bằng 0 tuyệt đối.
+>
+> Đây cũng là lý do hai metric này bổ sung cho nhau: **Recall trả lời "evidence
+> có được lấy về không", Precision trả lời "nó có được xếp lên trước không".**
+> Reranking theo định nghĩa chỉ tác động được vào câu hỏi thứ hai. Nếu ai đó báo
+> cáo reranking làm tăng recall thì gần như chắc chắn họ đã vô tình đổi cả tập
+> chunk (ví dụ đổi top-k), tức là thí nghiệm không còn kiểm soát biến.
 
 **Khi nào reranking không đủ và cần sửa retriever/query/chunking?**
 
-> *Câu trả lời:*
+> *Câu trả lời:* Reranking chỉ sắp xếp lại thứ hạng **trong tập đã lấy về**, nên
+> nó vô dụng bất cứ khi nào vấn đề nằm ở chính tập đó. Bốn dấu hiệu, kèm ví dụ
+> có thật trong run này:
+>
+> 1. **Recall thấp → chunk đúng không nằm trong tập.** Case A01 là ví dụ hoàn
+>    hảo: recall 0.257, `00_system_scope.md` chưa bao giờ lọt top-5. Rerank 5
+>    chunk sai vẫn là 5 chunk sai — đo thực tế precision còn tụt thêm (0.250 →
+>    0.200). Fix đúng: ghim governance document, hoặc scope-classifier trước
+>    retriever, hoặc tăng top-k.
+> 2. **Vocabulary mismatch có hệ thống → sửa query/retriever.** Câu hỏi
+>    out-of-scope theo định nghĩa không chia sẻ từ vựng với tài liệu định nghĩa
+>    scope. Không reranker lexical nào cứu được; cần semantic/hybrid retrieval
+>    hoặc query rewriting.
+> 3. **Recall cao nhưng answer vẫn thiếu → sửa chunking.** Khi một điều kiện bị
+>    cắt rời khỏi rule mà nó bổ nghĩa (ví dụ "10% restocking fee" nằm khác chunk
+>    với "opened device may be returned within 14 days"), model thấy rule mà
+>    không thấy điều kiện. Reranking không nối lại được hai mảnh; phải chunk theo
+>    ranh giới ngữ nghĩa hoặc cho chunk chồng lấn.
+> 4. **Precision đã gần trần → reranking không còn dư địa, chỉ còn rủi ro.**
+>    Chính là run này: baseline 0.897, 14/20 case đã 0.95–1.00. Khi baseline mạnh,
+>    một reranker yếu hơn chỉ có thể làm hỏng. Đây là bài học đo lường: **luôn
+>    kiểm tra headroom trước khi tối ưu**, nếu không sẽ tốn công cho một thay đổi
+>    có kỳ vọng âm.
+>
+> Quy tắc quyết định ngắn gọn: **recall thấp → sửa retrieval; recall cao +
+> precision thấp → rerank; recall cao + precision cao mà answer vẫn sai →
+> vấn đề ở generation hoặc ở chính thước đo** (trường hợp của lab này).
 
 ---
 
@@ -401,11 +646,11 @@ Hoàn thành `reflection.md` bằng kết quả thật từ Exercise 3.2.
 
 Hoàn thành kiểm tra cuối trong khoảng 16:50–17:00.
 
-- [ ] Tất cả required tests pass.
-- [ ] `golden_dataset.json` validate thành công.
-- [ ] Exercise 3.1 hoàn thành trong file JSON và bảng kết quả phía trên.
-- [ ] Exercise 3.2 có năm metrics, aggregate report và ba cases thấp nhất.
-- [ ] Exercise 3.3 có rubric 1–5 và bias controls.
-- [ ] `reflection.md` có ba failure analyses và regression strategy.
-- [ ] Đã copy `template.py` thành `solution/solution.py`.
-- [ ] Exercise 3.4 và 3.5 chỉ làm nếu chọn bonus.
+- [x] Tất cả required tests pass. — 42 passed (41 required + 1 bonus reranking).
+- [x] `golden_dataset.json` validate thành công. — `PASS`, coverage 10/10 documents.
+- [x] Exercise 3.1 hoàn thành trong file JSON và bảng kết quả phía trên.
+- [x] Exercise 3.2 có năm metrics, aggregate report và ba cases thấp nhất.
+- [x] Exercise 3.3 có rubric 1–5 và bias controls.
+- [x] `reflection.md` có ba failure analyses và regression strategy.
+- [x] Đã copy `template.py` thành `solution/solution.py`. — hash khớp.
+- [x] Exercise 3.4 và 3.5 chỉ làm nếu chọn bonus. — làm cả hai.
